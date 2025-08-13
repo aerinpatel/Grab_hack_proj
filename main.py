@@ -65,16 +65,24 @@ def find_nearby_locker(_input=None):
     exit(0)
 
 async def geocode_address(address: str) -> dict:
-    """Convert address string to {'latitude': float, 'longitude': float} using Google Geocoding API."""
-    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={Google_map_api}"
+    import aiohttp, os
+    print(f"[DEBUG] Geocoding address: {repr(address)}")
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("[ERROR] Google API key missing.")
+
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={api_key}"
+
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.json()
-    if data.get("status") == "OK" and len(data["results"]) > 0:
-        loc = data["results"][0]["geometry"]["location"]
-        return {"latitude": loc["lat"], "longitude": loc["lng"]}
-    else:
-        raise ValueError(f"Could not geocode address: {address}")
+        async with session.get(url) as response:
+            data = await response.json()
+
+    if data.get("status") != "OK":
+        raise ValueError(f"Could not geocode address: {address} — API status: {data.get('status')}")
+
+    return data["results"][0]["geometry"]["location"]
+
 
 async def call_routes_api(origin: dict, destination: dict, alternatives=False):
     url = "https://routes.googleapis.com/directions/v2:computeRoutes"
@@ -85,8 +93,14 @@ async def call_routes_api(origin: dict, destination: dict, alternatives=False):
     }
 
     body = {
-        "origin": {"location": {"latLng": origin}},
-        "destination": {"location": {"latLng": destination}},
+        "origin": {"location": {"latLng": {
+            "latitude": origin["latitude"],
+            "longitude": origin["longitude"]
+        }}},
+        "destination": {"location": {"latLng": {
+            "latitude": destination["latitude"],
+            "longitude": destination["longitude"]
+        }}},
         "travelMode": "DRIVE",
         "routingPreference": "TRAFFIC_AWARE_OPTIMAL"
     }
@@ -94,37 +108,74 @@ async def call_routes_api(origin: dict, destination: dict, alternatives=False):
     if alternatives:
         body["computeAlternativeRoutes"] = True
 
+ 
+    print(f"[DEBUG] Routes API request: {json.dumps(body, indent=2)}")
+
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=body) as resp:
-            return await resp.json()
+            result = await resp.json()
+            print(f"[DEBUG] Routes API response: {json.dumps(result, indent=2)}")  # Debug response
+            return result
+
+
+def _parse_duration_seconds(duration_str):
+    if isinstance(duration_str, str) and duration_str.endswith("s"):
+        return int(float(duration_str[:-1]))
+    return 0
 
 async def check_traffic(route_info: str) -> str:
-    origin_str, destination_str = route_info.split(";")
-    origin = await geocode_address(origin_str.strip())
-    destination = await geocode_address(destination_str.strip())
+    print(f"[DEBUG] check_traffic called with route_info: {repr(route_info)}")
 
-    data = await call_routes_api(origin, destination, alternatives=False)
+    if not route_info or ";" not in route_info:
+        return f"Invalid route info format: {route_info}. Expected 'Origin;Destination'."
 
-    if "routes" not in data or not data["routes"]:
-        return "Unable to retrieve route information."
+    origin_str, destination_str = route_info.split(";", 1)
+
+    try:
+        # Use geocode_address to get coordinates for origin and destination
+        origin = await geocode_address(origin_str.strip())
+        destination = await geocode_address(destination_str.strip())
+    except ValueError as e:
+        return f"[ERROR] {str(e)}"
+
+    url = (
+        "https://maps.googleapis.com/maps/api/directions/json"
+        f"?origin={origin['lat']},{origin['lng']}&destination={destination['lat']},{destination['lng']}&key={Google_map_api}"
+    )
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            data = await response.json()
+
+    print(f"[DEBUG] Google Directions API status: {data.get('status')}")
+
+    if data.get("status") != "OK":
+        return f"[ERROR] Unable to get directions: {data.get('status')}"
 
     route = data["routes"][0]
-    duration_with_traffic = route.get("durationWithTraffic", route.get("duration"))
-    distance_meters = route.get("distanceMeters")
+    leg = route["legs"][0]
 
-    # Simple heuristic: If duration with traffic > duration by 10%+, assume traffic issues
-    duration = route.get("duration", 0)
-    delay = duration_with_traffic - duration if duration_with_traffic and duration else 0
+    distance = leg["distance"]["text"]
+    duration = leg["duration"]["text"]
 
-    if delay > duration * 0.1:
-        return f"Traffic delay detected: estimated duration is {duration_with_traffic/60:.1f} minutes for {distance_meters/1000:.1f} km."
-    else:
-        return "No major traffic obstructions detected."
+    return (
+        f"Traffic between {origin_str} and {destination_str}:\n"
+        f"Distance: {distance}, Duration: {duration}"
+    )
+
 
 async def calculate_alternative_route(route_info: str) -> str:
     origin_str, destination_str = route_info.split(";")
-    origin = await geocode_address(origin_str.strip())
-    destination = await geocode_address(destination_str.strip())
+    origin_str = origin_str.strip().split(";")[0].strip()
+    destination_str = destination_str.strip().split(";")[0].strip()
+
+    if not origin_str or not destination_str:
+        return "[ERROR] Origin or destination is missing."
+
+    origin = await geocode_address(origin_str)
+    destination = await geocode_address(destination_str)
+
+
 
     data = await call_routes_api(origin, destination, alternatives=True)
 
@@ -142,6 +193,8 @@ async def calculate_alternative_route(route_info: str) -> str:
     distance_meters = best_route.get("distanceMeters", 0)
 
     return f"Alternative route via {summary}, estimated travel time {duration_with_traffic//60} minutes for {(distance_meters/1000):.1f} km."
+
+
 async def notify_passenger_and_driver(message: str) -> str:
     
     # Here, we will integrate with Twilio, Firebase Cloud Messaging, or anyother in-app chat API
@@ -188,11 +241,6 @@ def setup_agent():
             coroutine=suggest_safe_drop_off,
             description="Useful for proposing a safe location to leave a package, but ONLY after the recipient has given permission. Input is the drop-off location."
         ),
-        # Tool(
-        #     name="find_nearby_locker",
-        #     func=find_nearby_locker,
-        #     description="Useful for locating a secure parcel locker as a last resort if a safe drop-off is not possible. This tool does not require an input."
-        # ),
         Tool(
             name="find_nearby_locker",
             func=find_nearby_locker,
@@ -203,8 +251,8 @@ def setup_agent():
             name="check_traffic",
             func=check_traffic,
             coroutine=check_traffic,
-            description="Checks current traffic conditions on the planned route. Input is route details."
-        ),
+            description="Check traffic between two places. Input must be in the format 'Origin;Destination' with no extra text."
+        ),        
         Tool(
             name="calculate_alternative_route",
             func=calculate_alternative_route,
@@ -292,7 +340,6 @@ async def enhancing_reply(reply: str) -> str:
     async with aiohttp.ClientSession() as session:
         async with session.post(apiUrl, headers={'Content-Type': 'application/json'}, data=json.dumps(payload)) as response:
             result = await response.json()
-            # print(result)
             if result.get('candidates') and len(result['candidates']) > 0 and 'parts' in result['candidates'][0]['content']:
                 return result['candidates'][0]['content']['parts'][0]['text']
             else:
@@ -363,8 +410,8 @@ async def enhance_grabcar_input(user_input: str) -> str:
     prompt = (
         f"You are a prompt engineer for a GrabCar agent. "
         f"A passenger is on an urgent trip and {user_input}. "
-        f"The agent detects a major accident along the route. "
-        f"Your task is to generate an actionable goal for the agent, focusing on recalculating the route, notifying the passenger, "
+        f"The agent should first always check traffic and if no traffic detected it should exit program otherwise it should generate an actionable goal. "
+        f"Your task is to generate an actionable goal for the agent,which first focuses on checking traffic using check_traffic and if traffic or any disruption it should recalculating the route, notifying the passenger, "
         f"and checking the flight status if applicable. Output must be a single, direct sentence."
     )
 
@@ -415,4 +462,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    # asyncio.run(main())
