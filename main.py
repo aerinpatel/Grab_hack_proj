@@ -11,6 +11,8 @@ import threading
 
 load_dotenv() 
 Google_api = os.getenv("GOOGLE_API_KEY")
+Google_map_api = os.getenv("GOOGLE_MAPS_API_KEY")
+Flight_api = os.getenv("FLIGHT_API_KEY")
 user_scenario_input = ""
 recipient_reply = ""
 
@@ -62,6 +64,109 @@ def find_nearby_locker(_input=None):
     print("Found a secure parcel locker located at 'City Center Plaza', 5 minutes away from your home address. I am leaving your parcel safely. Access code and details sent to you via chat.")
     exit(0)
 
+async def geocode_address(address: str) -> dict:
+    """Convert address string to {'latitude': float, 'longitude': float} using Google Geocoding API."""
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={Google_map_api}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+    if data.get("status") == "OK" and len(data["results"]) > 0:
+        loc = data["results"][0]["geometry"]["location"]
+        return {"latitude": loc["lat"], "longitude": loc["lng"]}
+    else:
+        raise ValueError(f"Could not geocode address: {address}")
+
+async def call_routes_api(origin: dict, destination: dict, alternatives=False):
+    url = "https://routes.googleapis.com/directions/v2:computeRoutes"
+    headers = {
+        "X-Goog-Api-Key": Google_map_api,
+        "Content-Type": "application/json",
+        "X-Goog-FieldMask": "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.durationWithTraffic"
+    }
+
+    body = {
+        "origin": {"location": {"latLng": origin}},
+        "destination": {"location": {"latLng": destination}},
+        "travelMode": "DRIVE",
+        "routingPreference": "TRAFFIC_AWARE_OPTIMAL"
+    }
+
+    if alternatives:
+        body["computeAlternativeRoutes"] = True
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=body) as resp:
+            return await resp.json()
+
+async def check_traffic(route_info: str) -> str:
+    origin_str, destination_str = route_info.split(";")
+    origin = await geocode_address(origin_str.strip())
+    destination = await geocode_address(destination_str.strip())
+
+    data = await call_routes_api(origin, destination, alternatives=False)
+
+    if "routes" not in data or not data["routes"]:
+        return "Unable to retrieve route information."
+
+    route = data["routes"][0]
+    duration_with_traffic = route.get("durationWithTraffic", route.get("duration"))
+    distance_meters = route.get("distanceMeters")
+
+    # Simple heuristic: If duration with traffic > duration by 10%+, assume traffic issues
+    duration = route.get("duration", 0)
+    delay = duration_with_traffic - duration if duration_with_traffic and duration else 0
+
+    if delay > duration * 0.1:
+        return f"Traffic delay detected: estimated duration is {duration_with_traffic/60:.1f} minutes for {distance_meters/1000:.1f} km."
+    else:
+        return "No major traffic obstructions detected."
+
+async def calculate_alternative_route(route_info: str) -> str:
+    origin_str, destination_str = route_info.split(";")
+    origin = await geocode_address(origin_str.strip())
+    destination = await geocode_address(destination_str.strip())
+
+    data = await call_routes_api(origin, destination, alternatives=True)
+
+    if "routes" not in data or not data["routes"]:
+        return "Unable to find an alternative route."
+
+    # Pick alternative route if available
+    if len(data["routes"]) > 1:
+        best_route = data["routes"][1]
+    else:
+        best_route = data["routes"][0]
+
+    summary = best_route.get("routeLabel", "Unnamed road")
+    duration_with_traffic = best_route.get("durationWithTraffic", best_route.get("duration"))
+    distance_meters = best_route.get("distanceMeters", 0)
+
+    return f"Alternative route via {summary}, estimated travel time {duration_with_traffic//60} minutes for {(distance_meters/1000):.1f} km."
+async def notify_passenger_and_driver(message: str) -> str:
+    
+    # Here, we will integrate with Twilio, Firebase Cloud Messaging, or anyother in-app chat API
+    print(f"Sending notification: {message}")
+    # Simulate push notification delivery
+    await asyncio.sleep(1)  
+    return "Passenger and driver have been informed."
+
+async def check_flight_status(flight_number: str) -> str:
+
+    url = f"http://api.aviationstack.com/v1/flights?access_key={Flight_api}&flight_iata={flight_number}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+    if "data" not in data or not data["data"]:
+        return f"Unable to retrieve status for flight {flight_number}."
+
+    flight = data["data"][0]
+    status = flight.get("flight_status", "unknown").capitalize()
+    departure_time = flight["departure"].get("estimated", "N/A")
+
+    return f"Flight {flight_number} is currently {status}. Estimated departure: {departure_time}."
+
 
 def setup_agent():
 
@@ -93,7 +198,32 @@ def setup_agent():
             func=find_nearby_locker,
             coroutine=find_nearby_locker_async,
             description="Useful for locating a secure parcel locker..."
-        )
+        ),
+        Tool(
+            name="check_traffic",
+            func=check_traffic,
+            coroutine=check_traffic,
+            description="Checks current traffic conditions on the planned route. Input is route details."
+        ),
+        Tool(
+            name="calculate_alternative_route",
+            func=calculate_alternative_route,
+            coroutine=calculate_alternative_route,
+            description="Calculates an alternative fastest route when obstruction is detected. Input is route details."
+        ),
+        Tool(
+            name="notify_passenger_and_driver",
+            func=notify_passenger_and_driver,
+            coroutine=notify_passenger_and_driver,
+            description="Notifies both passenger and driver with updated route and ETA. Input is the notification message."
+        ),
+        Tool(
+            name="check_flight_status",
+            func=check_flight_status,
+            coroutine=check_flight_status,
+            description="Checks the current status of the passenger's flight. Input is the flight number."
+        ),
+
 
     ]
 
@@ -204,24 +334,84 @@ def input_with_timeout(prompt, timeout): #if user is not replying for 150 second
     return result["reply"]
 
 
+async def classify_scenario(user_input: str) -> str:
+    prompt = (
+        f"Classify the following situation into exactly one category:\n"
+        f"1. GrabExpress - If it involves a delivery partner, recipient, package delivery, drop-off, locker, or recipient not available.\n"
+        f"2. GrabCar - If it involves a passenger trip, traffic, airport, urgent travel, rerouting, or flight status.\n"
+        f"Return only the exact category name: GrabExpress or GrabCar. no other bs\n\n"
+        f"Situation: {user_input}"
+    )
 
+    chatHistory = [{"role": "user", "parts": [{"text": prompt}]}]
+    payload = {"contents": chatHistory}
+    apiKey = Google_api
+    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={apiKey}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(apiUrl, headers={'Content-Type': 'application/json'}, data=json.dumps(payload)) as response:
+            result = await response.json()
+            if result.get('candidates') and len(result['candidates']) > 0 and 'parts' in result['candidates'][0]['content']:
+                classification = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                if classification not in ["GrabExpress", "GrabCar"]:
+                    return "GrabExpress"  # default fallback if classification is not recognized
+                return classification
+            else:
+                return "GrabExpress"  # fallback if API fails
+
+async def enhance_grabcar_input(user_input: str) -> str:
+    prompt = (
+        f"You are a prompt engineer for a GrabCar agent. "
+        f"A passenger is on an urgent trip and {user_input}. "
+        f"The agent detects a major accident along the route. "
+        f"Your task is to generate an actionable goal for the agent, focusing on recalculating the route, notifying the passenger, "
+        f"and checking the flight status if applicable. Output must be a single, direct sentence."
+    )
+
+    chatHistory = [{"role": "user", "parts": [{"text": prompt}]}]
+    payload = {"contents": chatHistory}
+    apiKey = Google_api
+    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={apiKey}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(apiUrl, headers={'Content-Type': 'application/json'}, data=json.dumps(payload)) as response:
+            result = await response.json()
+            if result.get('candidates') and len(result['candidates']) > 0 and 'parts' in result['candidates'][0]['content']:
+                return result['candidates'][0]['content']['parts'][0]['text']
+            else:
+                return (
+                    "A passenger is on an urgent trip and a major traffic obstruction was detected. "
+                    "Recalculate the route, notify the passenger and driver, and check the passenger's flight status."
+                )
 
 
 # main starting point 
 async def main():
     delivery_agent = setup_agent()
-    
-    
-    user_input = input("Hii Delivery Agent send your message to the recipient \n> ")
-    
+
     global user_scenario_input, recipient_reply
+    recipient_reply = ""
+
+    user_input = input("Enter your situation:\n> ")
     user_scenario_input = user_input
-    recipient_reply = "" 
-    
-    agent_goal = await enhance_userinput(user_input)  # just used for enhancing the dilivery guy provided input 
-    
-    
-    await delivery_agent.arun(agent_goal) #finally run based upon generated agent goal 
+
+    scenario = await classify_scenario(user_input)
+    print(f"[DEBUG] Identified scenario: {scenario}")
+
+    if scenario == "GrabExpress":
+        agent_goal = await enhance_userinput(user_input)
+        await delivery_agent.arun(agent_goal)
+
+    elif scenario == "GrabCar":
+        origin = input("Enter the origin (default: Surat):\n> ").strip() or "Surat"
+        destination = input("Enter the destination (default: Mumbai):\n> ").strip() or "Mumbai"
+        route_info = f"{origin};{destination}"
+        
+        print(f"[DEBUG] Using route info: {route_info}")
+        
+        agent_goal = await enhance_grabcar_input(user_input)
+        await delivery_agent.arun(agent_goal)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
