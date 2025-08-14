@@ -81,7 +81,8 @@ async def geocode_address(address: str) -> dict:
     if data.get("status") != "OK":
         raise ValueError(f"Could not geocode address: {address} — API status: {data.get('status')}")
 
-    return data["results"][0]["geometry"]["location"]
+    location = data["results"][0]["geometry"]["location"]
+    return {"latitude": location["lat"], "longitude": location["lng"]}
 
 
 async def call_routes_api(origin: dict, destination: dict, alternatives=False):
