@@ -1,6 +1,5 @@
 <h1 align="center" id="title">Project Synapse</h1>
 
-<p align="center"><img src="https://socialify.git.ci/shiwal25/GrabHack/image?font=JetBrains+Mono&amp;language=1&amp;name=1&amp;pattern=Circuit+Board&amp;theme=Light" alt="project-image"></p>
 
 <p id="description">Developed an asynchronous event-driven Python application that leverages LangChain Google Generative AI (Gemini) and Google Maps Platform to automate decision-making in two operational domains: GrabExpress: Handles delivery partner–recipient communication suggests safe drop-off locations finds secure lockers and processes recipient responses with LLM-based intent parsing. GrabCar: Monitors traffic between origin–destination calculates alternative optimal routes notifies passengers/drivers and checks live flight statuses for urgent trips. Key Features: Natural language classification of user scenarios into logistics or ride-hailing workflows. Prompt engineering for enhanced agent goals and precise LLM responses. Real-time geocoding routing and traffic analysis via Google Maps APIs. Flight status tracking using AviationStack API. Automated timeout handling for unresponsive users. Integrated with asynchronous coroutines for scalable concurrent API calls.</p>
 
