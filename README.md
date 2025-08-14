@@ -5,8 +5,11 @@
 
 <h2>🚀 Demo</h2>
 
+Explanations :
 [https://youtu.be/XnvdVjgUIKA](https://youtu.be/XnvdVjgUIKA)
 
+Code Architecture of Prototype :
+[https://app.eraser.io/workspace/72CRzJvRh0oKGkwe4omY?origin=share](https://app.eraser.io/workspace/72CRzJvRh0oKGkwe4omY?origin=share)
   
   
 <h2>🧐 Features</h2>
