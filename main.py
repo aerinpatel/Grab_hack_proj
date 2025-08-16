@@ -227,7 +227,7 @@ def setup_agent():
     if not Google_api:
         raise ValueError("GOOGLE_API_KEY not found in env file") #if we are not able to find our gemini api key 
 
-    llm = GoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)  # using free teir gemini api key 
+    llm = GoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)  # using free teir gemini api key 
     # temperature set to 0 right now to get deterministic output ( for removing randomness for now ), can be changed later if needed
     tools = [
         Tool(
